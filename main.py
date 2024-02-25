@@ -1,49 +1,64 @@
-import sys
-print(sys.path)
+from fastapi import FastAPI, HTTPException
+import asyncpg
+from pydantic import BaseModel
+from fastapi.responses import FileResponse
 
-from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.orm import Session
-from db.database import SessionLocal, engine
-from api import models, crud
-from db.database import Base
-from fastapi.responses import HTMLResponse
-
-
-# Create the database tables
-models.Base.metadata.create_all(bind=engine)
-
+# Create a FastAPI instance
 app = FastAPI()
 
-@app.get("/", response_class=HTMLResponse)
-async def homepage():
-    with open("./static/index.html", "r") as file:
-        html_content = file.read()
-    return html_content
+# Database connection pool
+pool = None
 
-# Dependency to get a database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Model for the data
+class Item(BaseModel):
+    name: str
+    description: str = None
+    price: float
 
-@app.post("/items/", response_model=models.Item)
-def create_item(item: models.ItemCreate, db: Session = Depends(get_db)):
-    return crud.create_item(db=db, item=item)
+@app.get("/")
+async def get_index():
+    return FileResponse("static/index.html")    
 
-@app.get("/items/", response_model=list[models.Item])
-def read_items(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    return crud.get_items(db=db, skip=skip, limit=limit)
 
-@app.get("/items/{item_id}", response_model=models.Item)
-def read_item(item_id: int, db: Session = Depends(get_db)):
-    return crud.get_items(db=db, item_id=item_id)
+# Function to initialize database connection pool
+async def get_pool():
+    if pool is None:
+        pool = await asyncpg.create_pool(user='postgres', password='postgres',
+                                         database='apidatabase', host='localhost')
+    return app.state.pool
 
-@app.put("/items/{item_id}", response_model=models.Item)
-def update_item(item_id: int, item: models.ItemCreate, db: Session = Depends(get_db)):
-    return crud.update_item(db=db, item_id=item_id, item=item)
+# Create operation
+@app.post("/")
+async def create_item(item: Item):
+    query = "INSERT INTO items(name, description, price) VALUES($1, $2, $3) RETURNING id"
+    async with get_pool() as pool:
+        async with pool.acquire() as con:
+            item_id = await con.fetchval(query, item.name, item.description, item.price)
+    return {"id": item_id, **item.dict()}
 
-@app.delete("/items/{item_id}", response_model=models.Item)
-def delete_item(item_id: int, db: Session = Depends(get_db)):
-    return crud.delete_item(db=db, item_id=item_id)
+# Read operation
+@app.get("/")
+async def read_items():
+    query = "SELECT * FROM items"
+    async with get_pool() as pool:
+        async with pool.acquire() as con:
+            rows = await con.fetch(query)
+            return [dict(row) for row in rows]
+
+# Update operation
+@app.put("/update/{item_id}")
+async def update_item(item_id: int, item: Item):
+    query = "UPDATE items SET name=$1, description=$2, price=$3 WHERE id=$4"
+    async with get_pool() as pool:
+        async with pool.acquire() as con:
+            await con.execute(query, item.name, item.description, item.price, item_id)
+    return {"id": item_id, **item.dict()}
+
+# Delete operation
+@app.delete("/delete/{item_id}")
+async def delete_item(item_id: int):
+    query = "DELETE FROM items WHERE id = $1"
+    async with get_pool() as pool:
+        async with pool.acquire() as con:
+            await con.execute(query, item_id)
+    return {"message": "Item deleted successfully"}
