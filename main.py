@@ -1,64 +1,90 @@
-from fastapi import FastAPI, HTTPException
-import asyncpg
-from pydantic import BaseModel
-from fastapi.responses import FileResponse
+from typing import List
+from fastapi import FastAPI, status, HTTPException, Depends
+from database import Base, engine, SessionLocal
+from sqlalchemy.orm import Session
+import models
+import schemas
 
-# Create a FastAPI instance
+# Create the database
+Base.metadata.create_all(engine)
+
+# Initialize app
 app = FastAPI()
 
-# Database connection pool
-pool = None
-
-# Model for the data
-class Item(BaseModel):
-    name: str
-    description: str = None
-    price: float
+# Helper function to get database session
+def get_session():
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
 
 @app.get("/")
-async def get_index():
-    return FileResponse("static/index.html")    
+def root():
+    return "todooo"
 
+@app.post("/todo", response_model=schemas.ToDo, status_code=status.HTTP_201_CREATED)
+def create_todo(todo: schemas.ToDoCreate, session: Session = Depends(get_session)):
 
-# Function to initialize database connection pool
-async def get_pool():
-    if pool is None:
-        pool = await asyncpg.create_pool(user='postgres', password='postgres',
-                                         database='apidatabase', host='localhost')
-    return app.state.pool
+    # create an instance of the ToDo database model
+    tododb = models.ToDo(task = todo.task)
 
-# Create operation
-@app.post("/")
-async def create_item(item: Item):
-    query = "INSERT INTO items(name, description, price) VALUES($1, $2, $3) RETURNING id"
-    async with get_pool() as pool:
-        async with pool.acquire() as con:
-            item_id = await con.fetchval(query, item.name, item.description, item.price)
-    return {"id": item_id, **item.dict()}
+    # add it to the session and commit it
+    session.add(tododb)
+    session.commit()
+    session.refresh(tododb)
 
-# Read operation
-@app.get("/")
-async def read_items():
-    query = "SELECT * FROM items"
-    async with get_pool() as pool:
-        async with pool.acquire() as con:
-            rows = await con.fetch(query)
-            return [dict(row) for row in rows]
+    # return the todo object
+    return tododb
 
-# Update operation
-@app.put("/update/{item_id}")
-async def update_item(item_id: int, item: Item):
-    query = "UPDATE items SET name=$1, description=$2, price=$3 WHERE id=$4"
-    async with get_pool() as pool:
-        async with pool.acquire() as con:
-            await con.execute(query, item.name, item.description, item.price, item_id)
-    return {"id": item_id, **item.dict()}
+@app.get("/todo/{id}", response_model=schemas.ToDo)
+def read_todo(id: int, session: Session = Depends(get_session)):
 
-# Delete operation
-@app.delete("/delete/{item_id}")
-async def delete_item(item_id: int):
-    query = "DELETE FROM items WHERE id = $1"
-    async with get_pool() as pool:
-        async with pool.acquire() as con:
-            await con.execute(query, item_id)
-    return {"message": "Item deleted successfully"}
+    # get the todo item with the given id
+    todo = session.query(models.ToDo).get(id)
+
+    # check if todo item with given id exists. If not, raise exception and return 404 not found response
+    if not todo:
+        raise HTTPException(status_code=404, detail=f"todo item with id {id} not found")
+
+    return todo
+
+@app.put("/todo/{id}", response_model=schemas.ToDo)
+def update_todo(id: int, task: str, session: Session = Depends(get_session)):
+
+    # get the todo item with the given id
+    todo = session.query(models.ToDo).get(id)
+
+    # update todo item with the given task (if an item with the given id was found)
+    if todo:
+        todo.task = task
+        session.commit()
+
+    # check if todo item with given id exists. If not, raise exception and return 404 not found response
+    if not todo:
+        raise HTTPException(status_code=404, detail=f"todo item with id {id} not found")
+
+    return todo
+
+@app.delete("/todo/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_todo(id: int, session: Session = Depends(get_session)):
+
+    # get the todo item with the given id
+    todo = session.query(models.ToDo).get(id)
+
+    # if todo item with given id exists, delete it from the database. Otherwise raise 404 error
+    if todo:
+        session.delete(todo)
+        session.commit()
+    else:
+        raise HTTPException(status_code=404, detail=f"todo item with id {id} not found")
+
+    return None
+
+@app.get("/todo", response_model = List[schemas.ToDo])
+def read_todo_list(session: Session = Depends(get_session)):
+
+    # get all todo items
+    todo_list = session.query(models.ToDo).all()
+
+    return todo_list
